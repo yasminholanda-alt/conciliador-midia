@@ -39,20 +39,13 @@ def obter_variacoes_programa(programa_ap):
             return [limpar_nome_programa(v) for v in variacoes]
     return [prog_limpo]
 
-def extrair_qtd_inteligente(linha, programa_encontrado):
-    # Remove horários no formato HH:MM:SS ou HH:MM para evitar ler minutos/segundos como quantidade
+def extrair_qtd_inteligente(linha):
     linha_sem_horario = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', linha)
-    
-    # Busca números restantes na linha
     numeros = re.findall(r'\b\d+\b', linha_sem_horario)
-    
-    # Filtra números razoáveis para inserções (ex: evita ler anos como 2024/2025 ou TPs de 6 dígitos)
     numeros_validos = [int(n) for n in numeros if int(n) < 1000]
-    
     if numeros_validos:
-        # Pega o número válido de menor valor ou o último número coerente
         return numeros_validos[-1]
-    return 1 # Se não encontrar número de quantidade limpo, considera 1 inserção por ocorrência
+    return 1
 
 st.title("📊 Conciliador de Mídia - 3 Vias")
 st.markdown("Faça o upload dos 3 PDFs da campanha para gerar a auditoria automática de faturamento.")
@@ -81,22 +74,36 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     else:
         with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
             try:
-                # 1. PROCESSANDO AP
+                # 1. PROCESSANDO AP (LEITURA SEGURA)
                 dados_ap = []
                 with pdfplumber.open(arquivo_ap) as pdf:
-                    for linha in pdf.pages[0].extract_text().split('\n'):
-                        if "(" in linha and ")" in linha and "FONE" not in linha and "CLIENTE" not in linha:
-                            nome_prog = linha.split(")")[0].split("(")[0].strip()
-                            qtd = int(linha.split(")")[-1].strip().split()[-4])
-                            dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
+                    for pagina in pdf.pages:
+                        texto_pag = pagina.extract_text()
+                        if texto_pag:
+                            for linha in texto_pag.split('\n'):
+                                if "(" in linha and ")" in linha and "FONE" not in linha and "CLIENTE" not in linha:
+                                    try:
+                                        nome_prog = linha.split(")")[0].split("(")[0].strip()
+                                        numeros = re.findall(r'\b\d+\b', linha)
+                                        if numeros:
+                                            qtd = int(numeros[-1]) # Pega o último número com segurança
+                                        else:
+                                            qtd = 1
+                                        dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
+                                    except Exception:
+                                        continue
                 
                 tabela_ap = pd.DataFrame(dados_ap)
-                tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
-                tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
+                if not tabela_ap.empty:
+                    tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
+                    tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
+                else:
+                    st.warning("⚠️ Nenhum programa válido foi identificado na AP. Verifique o layout do PDF.")
+                    st.stop()
 
                 programas_ap = tabela_ap["Programa"].tolist()
 
-                # 2. PROCESSANDO MAPA (OCR COM FILTRO ANTI-HORÁRIO)
+                # 2. PROCESSANDO MAPA
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -110,26 +117,27 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                     for prog in programas_ap:
                         variacoes = obter_variacoes_programa(prog)
                         if any(v in linha_limpa for v in variacoes):
-                            qtd = extrair_qtd_inteligente(linha_limpa, prog)
-                            dados_mapa.append({"Programa": prog, "Qtd_Mapa": qtd})
+                            dados_mapa.append({"Programa": prog, "Qtd_Mapa": 1})
 
                 tabela_mapa = pd.DataFrame(dados_mapa)
                 if not tabela_mapa.empty:
-                    # Em mapas escaneados por linha, contamos as ocorrências válidas
                     tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).agg({"Qtd_Mapa": "count"})
                 else:
                     tabela_mapa = pd.DataFrame(columns=["Programa", "Qtd_Mapa"])
 
-                # 3. PROCESSANDO AUDITORIA
+                # 3. PROCESSANDO AUDITORIA (LEITURA SEGURA)
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
-                    for linha in pdf.pages[0].extract_text().split('\n'):
-                        linha_limpa = limpar_nome_programa(linha)
-                        for prog in programas_ap:
-                            variacoes = obter_variacoes_programa(prog)
-                            if any(v in linha_limpa for v in variacoes):
-                                qtd = extrair_qtd_inteligente(linha_limpa, prog)
-                                dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
+                    for pagina in pdf.pages:
+                        texto_pag = pagina.extract_text()
+                        if texto_pag:
+                            for linha in texto_pag.split('\n'):
+                                linha_limpa = limpar_nome_programa(linha)
+                                for prog in programas_ap:
+                                    variacoes = obter_variacoes_programa(prog)
+                                    if any(v in linha_limpa for v in variacoes):
+                                        qtd = extrair_qtd_inteligente(linha_limpa)
+                                        dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
 
                 tabela_auditoria = pd.DataFrame(dados_auditoria)
                 if not tabela_auditoria.empty:
