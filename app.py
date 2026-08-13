@@ -14,7 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Dicionário de Sinônimos / De-Para
+# Dicionário de Sinônimos / De-Para (Adicione mais se necessário)
 SINONIMOS_PROGRAMAS = {
     "PIPP": ["PIPP", "PRIMEIRO IMPACTO", "PRIMEIRO IMPACTO PE"],
     "JN": ["JN", "JORNAL NACIONAL"],
@@ -23,7 +23,6 @@ SINONIMOS_PROGRAMAS = {
     "CFT": ["CFT", "CALDEIRAO", "CALDEIRAO COM MION"]
 }
 
-# Limpeza com e sem remoção total de espaços para permitir match perfeito
 def limpar_texto(texto, remover_espacos_totais=False):
     if not texto or pd.isna(texto):
         return ""
@@ -75,28 +74,31 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     if not (arquivo_ap and arquivo_mapa and arquivo_auditoria):
         st.error("⚠️ Por favor, faça o upload dos **3 arquivos** antes de prosseguir.")
     else:
-        with st.spinner("Processando documentos e cruzando sinônimos flexíveis... Aguarde..."):
+        with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
             try:
-                # 1. PROCESSANDO AP (Filtro Anti-Cabeçalho)
+                # 1. PROCESSANDO AP (Extração com Regex no que estiver dentro de parênteses)
                 dados_ap = []
                 with pdfplumber.open(arquivo_ap) as pdf:
                     for pagina in pdf.pages:
                         texto_pag = pagina.extract_text()
                         if texto_pag:
                             for linha in texto_pag.split('\n'):
-                                # Ignora linhas institucionais e de cabeçalho
-                                if "(" in linha and ")" in linha and "FONE" not in linha and "CLIENTE" not in linha and "COLOCACAO" not in linha:
-                                    try:
-                                        nome_prog = linha.split(")")[0].split("(")[0].strip()
-                                        numeros = re.findall(r'\b\d+\b', linha)
-                                        if numeros:
-                                            qtd = int(numeros[-1])
-                                            # Filtra falsos positivos de ano/código
-                                            if qtd < 500:
-                                                dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
-                                    except Exception:
-                                        continue
-                
+                                # Filtra linhas válidas de programas
+                                if "FONE" not in linha and "CLIENTE" not in linha and "COLOCACAO" not in linha:
+                                    # Procura texto dentro de parênteses
+                                    match_parenteses = re.search(r'\((.*?)\)', linha)
+                                    if match_parenteses:
+                                        nome_prog = match_parenteses.group(1).strip()
+                                    else:
+                                        # Se não houver parênteses, pega o texto antes dos números
+                                        nome_prog = re.sub(r'\d.*', '', linha).strip()
+
+                                    numeros = re.findall(r'\b\d+\b', linha)
+                                    if numeros and len(nome_prog) > 2:
+                                        qtd = int(numeros[-1])
+                                        if qtd < 500: # Ignora códigos de 4 dígitos ou anos
+                                            dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
+
                 tabela_ap = pd.DataFrame(dados_ap)
                 if not tabela_ap.empty:
                     tabela_ap["Programa_Exibicao"] = tabela_ap["Programa"].apply(lambda x: limpar_texto(x, False))
@@ -108,7 +110,7 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
 
                 programas_ap_map = dict(zip(tabela_ap["Programa_Comparacao"], tabela_ap["Programa_Exibicao"]))
 
-                # 2. PROCESSANDO MAPA (Match sem espaços)
+                # 2. PROCESSANDO MAPA
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -131,7 +133,7 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 else:
                     tabela_mapa = pd.DataFrame(columns=["Programa_Exibicao", "Qtd_Mapa"])
 
-                # 3. PROCESSANDO AUDITORIA (Match sem espaços)
+                # 3. PROCESSANDO AUDITORIA
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
                     for pagina in pdf.pages:
