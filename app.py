@@ -15,10 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# DICIONÁRIO DE SINÔNIMOS / DE-PARA DE PROGRAMAS
-# Adicione novos apelidos e siglas aqui conforme necessário!
-# ---------------------------------------------------------
+# Dicionário de Sinônimos / De-Para
 SINONIMOS_PROGRAMAS = {
     "PIPP": ["PIPP", "PRIMEIRO IMPACTO", "PRIMEIRO IMPACTO PE"],
     "JN": ["JN", "JORNAL NACIONAL"],
@@ -37,12 +34,25 @@ def limpar_nome_programa(texto):
 
 def obter_variacoes_programa(programa_ap):
     prog_limpo = limpar_nome_programa(programa_ap)
-    # Procura se o programa da AP tem variações cadastradas
     for chave, variacoes in SINONIMOS_PROGRAMAS.items():
         if prog_limpo == chave or prog_limpo in [limpar_nome_programa(v) for v in variacoes]:
             return [limpar_nome_programa(v) for v in variacoes]
-    # Se não houver variação cadastrada, retorna o próprio nome
     return [prog_limpo]
+
+def extrair_qtd_inteligente(linha, programa_encontrado):
+    # Remove horários no formato HH:MM:SS ou HH:MM para evitar ler minutos/segundos como quantidade
+    linha_sem_horario = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', linha)
+    
+    # Busca números restantes na linha
+    numeros = re.findall(r'\b\d+\b', linha_sem_horario)
+    
+    # Filtra números razoáveis para inserções (ex: evita ler anos como 2024/2025 ou TPs de 6 dígitos)
+    numeros_validos = [int(n) for n in numeros if int(n) < 1000]
+    
+    if numeros_validos:
+        # Pega o número válido de menor valor ou o último número coerente
+        return numeros_validos[-1]
+    return 1 # Se não encontrar número de quantidade limpo, considera 1 inserção por ocorrência
 
 st.title("📊 Conciliador de Mídia - 3 Vias")
 st.markdown("Faça o upload dos 3 PDFs da campanha para gerar a auditoria automática de faturamento.")
@@ -69,7 +79,7 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     if not (arquivo_ap and arquivo_mapa and arquivo_auditoria):
         st.error("⚠️ Por favor, faça o upload dos **3 arquivos** antes de prosseguir.")
     else:
-        with st.spinner("Processando documentos e cruzando sinônimos... Aguarde..."):
+        with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
             try:
                 # 1. PROCESSANDO AP
                 dados_ap = []
@@ -84,10 +94,9 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
                 tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
 
-                # Lista de programas base
                 programas_ap = tabela_ap["Programa"].tolist()
 
-                # 2. PROCESSANDO MAPA (OCR NATIVO COM BUSCA POR SINÔNIMOS)
+                # 2. PROCESSANDO MAPA (OCR COM FILTRO ANTI-HORÁRIO)
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -101,18 +110,17 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                     for prog in programas_ap:
                         variacoes = obter_variacoes_programa(prog)
                         if any(v in linha_limpa for v in variacoes):
-                            numeros = re.findall(r'\b\d+\b', linha_limpa)
-                            if numeros:
-                                qtd = int(numeros[-1])
-                                dados_mapa.append({"Programa": prog, "Qtd_Mapa": qtd})
+                            qtd = extrair_qtd_inteligente(linha_limpa, prog)
+                            dados_mapa.append({"Programa": prog, "Qtd_Mapa": qtd})
 
                 tabela_mapa = pd.DataFrame(dados_mapa)
                 if not tabela_mapa.empty:
-                    tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).sum()
+                    # Em mapas escaneados por linha, contamos as ocorrências válidas
+                    tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).agg({"Qtd_Mapa": "count"})
                 else:
                     tabela_mapa = pd.DataFrame(columns=["Programa", "Qtd_Mapa"])
 
-                # 3. PROCESSANDO AUDITORIA (BUSCA POR SINÔNIMOS)
+                # 3. PROCESSANDO AUDITORIA
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
                     for linha in pdf.pages[0].extract_text().split('\n'):
@@ -120,10 +128,8 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                         for prog in programas_ap:
                             variacoes = obter_variacoes_programa(prog)
                             if any(v in linha_limpa for v in variacoes):
-                                numeros = re.findall(r'\b\d+\b', linha_limpa)
-                                if numeros:
-                                    qtd = int(numeros[-1])
-                                    dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
+                                qtd = extrair_qtd_inteligente(linha_limpa, prog)
+                                dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
 
                 tabela_auditoria = pd.DataFrame(dados_auditoria)
                 if not tabela_auditoria.empty:
