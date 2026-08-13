@@ -8,14 +8,13 @@ import io
 import re
 import unicodedata
 
-# Configuração da página do Streamlit
+# Configuração da página
 st.set_page_config(
     page_title="Conciliador de Mídia",
     page_icon="📊",
     layout="wide"
 )
 
-# Função para padronizar os nomes dos programas e evitar divergências por espaço/acento
 def limpar_nome_programa(texto):
     if not texto:
         return ""
@@ -29,7 +28,6 @@ st.markdown("Faça o upload dos 3 PDFs da campanha para gerar a auditoria autom�
 
 st.divider()
 
-# --- ÁREA DE UPLOAD DOS ARQUIVOS ---
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -46,14 +44,13 @@ with col3:
 
 st.divider()
 
-# --- PROCESSAMENTO DOS DADOS ---
 if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     if not (arquivo_ap and arquivo_mapa and arquivo_auditoria):
         st.error("⚠️ Por favor, faça o upload dos **3 arquivos** antes de prosseguir.")
     else:
-        with st.spinner("Processando documentos e executando OCR... Aguarde..."):
+        with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
             try:
-                # 1. PROCESSANDO AP
+                # 1. PROCESSANDO AP (DEFININDO A LISTA MESTRA DE PROGRAMAS)
                 dados_ap = []
                 with pdfplumber.open(arquivo_ap) as pdf:
                     for linha in pdf.pages[0].extract_text().split('\n'):
@@ -61,9 +58,15 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                             nome_prog = linha.split(")")[0].split("(")[0].strip()
                             qtd = int(linha.split(")")[-1].strip().split()[-4])
                             dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
+                
                 tabela_ap = pd.DataFrame(dados_ap)
+                tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
+                tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
 
-                # 2. PROCESSANDO MAPA (OCR NATIVO)
+                # Lista de programas autorizados
+                programas_validos = tabela_ap["Programa"].tolist()
+
+                # 2. PROCESSANDO MAPA (FILTRANDO APENAS PROGRAMAS DA AP)
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -73,45 +76,47 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
 
                 dados_mapa = []
                 for linha in texto_mapa.split('\n'):
-                    linha_limpa = linha.strip()
-                    if linha_limpa:
-                        numeros = re.findall(r'\b\d+\b', linha_limpa)
-                        if numeros:
-                            qtd = int(numeros[-1])
-                            nome_prog = re.sub(r'\b\d+\b', '', linha_limpa).strip()
-                            if len(nome_prog) > 2:
-                                dados_mapa.append({"Programa": nome_prog, "Qtd_Mapa": qtd})
-                tabela_mapa = pd.DataFrame(dados_mapa).groupby("Programa", as_index=False).sum()
+                    linha_limpa = limpar_nome_programa(linha)
+                    # Verifica se algum programa autorizado está contido nesta linha
+                    for prog in programas_validos:
+                        if prog in linha_limpa:
+                            numeros = re.findall(r'\b\d+\b', linha_limpa)
+                            if numeros:
+                                qtd = int(numeros[-1])
+                                dados_mapa.append({"Programa": prog, "Qtd_Mapa": qtd})
 
-                # 3. PROCESSANDO AUDITORIA
+                tabela_mapa = pd.DataFrame(dados_mapa)
+                if not tabela_mapa.empty:
+                    tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).sum()
+                else:
+                    tabela_mapa = pd.DataFrame(columns=["Programa", "Qtd_Mapa"])
+
+                # 3. PROCESSANDO AUDITORIA (FILTRANDO APENAS PROGRAMAS DA AP)
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
                     for linha in pdf.pages[0].extract_text().split('\n'):
-                        if "BCO DO NORDESTE" in linha and "/" in linha:
-                            qtd = int(linha.split()[-1])
-                            trecho = linha.split("- CREDIAMIGO ")[1].replace("001 ", "", 1)
-                            nome_prog = " ".join([p for p in trecho.split() if "/" not in p][:-1])
-                            dados_auditoria.append({"Programa": nome_prog, "Qtd_Auditoria": qtd})
-                tabela_auditoria = pd.DataFrame(dados_auditoria).groupby("Programa", as_index=False).sum()
+                        linha_limpa = limpar_nome_programa(linha)
+                        for prog in programas_validos:
+                            if prog in linha_limpa:
+                                numeros = re.findall(r'\b\d+\b', linha_limpa)
+                                if numeros:
+                                    qtd = int(numeros[-1])
+                                    dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
 
-                # --- PADRONIZAÇÃO DE NOMES (LIMPEZA ANTI-ERRO) ---
-                tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
-                tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
+                tabela_auditoria = pd.DataFrame(dados_auditoria)
+                if not tabela_auditoria.empty:
+                    tabela_auditoria = tabela_auditoria.groupby("Programa", as_index=False).sum()
+                else:
+                    tabela_auditoria = pd.DataFrame(columns=["Programa", "Qtd_Auditoria"])
 
-                tabela_mapa["Programa"] = tabela_mapa["Programa"].apply(limpar_nome_programa)
-                tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).sum()
+                # 4. CRUZAMENTO DIRETO E LIMPO
+                df_final = pd.merge(tabela_ap, tabela_mapa, on="Programa", how="left").fillna(0)
+                df_final = pd.merge(df_final, tabela_auditoria, on="Programa", how="left").fillna(0)
 
-                tabela_auditoria["Programa"] = tabela_auditoria["Programa"].apply(limpar_nome_programa)
-                tabela_auditoria = tabela_auditoria.groupby("Programa", as_index=False).sum()
-
-                # 4. CRUZAMENTO
-                df_final = pd.merge(tabela_ap, tabela_mapa, on="Programa", how="outer").fillna(0)
-                df_final = pd.merge(df_final, tabela_auditoria, on="Programa", how="outer").fillna(0)
-                
                 df_final["Erro_Veiculo"] = df_final["Qtd_AP"] - df_final["Qtd_Mapa"]
                 df_final["Erro_Auditoria"] = df_final["Qtd_AP"] - df_final["Qtd_Auditoria"]
 
-                # Exibindo Resultados
+                # RESULTADOS
                 erros = df_final[(df_final["Erro_Veiculo"] != 0) | (df_final["Erro_Auditoria"] != 0)]
 
                 if erros.empty:
@@ -123,7 +128,6 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 st.subheader("📋 Tabela Completa do Cruzamento")
                 st.dataframe(df_final, use_container_width=True)
 
-                # Botão de Exportar para Excel
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df_final.to_excel(writer, index=False, sheet_name='Conciliacao')
