@@ -8,7 +8,6 @@ import io
 import re
 import unicodedata
 
-# Configuração da página
 st.set_page_config(
     page_title="Conciliador de Mídia",
     page_icon="📊",
@@ -24,20 +23,24 @@ SINONIMOS_PROGRAMAS = {
     "CFT": ["CFT", "CALDEIRAO", "CALDEIRAO COM MION"]
 }
 
-def limpar_nome_programa(texto):
-    if not texto:
+# Limpeza com e sem remoção total de espaços para permitir match perfeito
+def limpar_texto(texto, remover_espacos_totais=False):
+    if not texto or pd.isna(texto):
         return ""
     texto = str(texto).upper().strip()
     texto = ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
-    texto = re.sub(r'\s+', ' ', texto)
+    if remover_espacos_totais:
+        texto = re.sub(r'[^A-Z0-9]', '', texto)
+    else:
+        texto = re.sub(r'\s+', ' ', texto)
     return texto
 
 def obter_variacoes_programa(programa_ap):
-    prog_limpo = limpar_nome_programa(programa_ap)
+    prog_limpo = limpar_texto(programa_ap)
     for chave, variacoes in SINONIMOS_PROGRAMAS.items():
-        if prog_limpo == chave or prog_limpo in [limpar_nome_programa(v) for v in variacoes]:
-            return [limpar_nome_programa(v) for v in variacoes]
-    return [prog_limpo]
+        if prog_limpo == chave or prog_limpo in [limpar_texto(v) for v in variacoes]:
+            return [limpar_texto(v, remover_espacos_totais=True) for v in variacoes]
+    return [limpar_texto(prog_limpo, remover_espacos_totais=True)]
 
 def extrair_qtd_inteligente(linha):
     linha_sem_horario = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', linha)
@@ -72,38 +75,40 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     if not (arquivo_ap and arquivo_mapa and arquivo_auditoria):
         st.error("⚠️ Por favor, faça o upload dos **3 arquivos** antes de prosseguir.")
     else:
-        with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
+        with st.spinner("Processando documentos e cruzando sinônimos flexíveis... Aguarde..."):
             try:
-                # 1. PROCESSANDO AP (LEITURA SEGURA)
+                # 1. PROCESSANDO AP (Filtro Anti-Cabeçalho)
                 dados_ap = []
                 with pdfplumber.open(arquivo_ap) as pdf:
                     for pagina in pdf.pages:
                         texto_pag = pagina.extract_text()
                         if texto_pag:
                             for linha in texto_pag.split('\n'):
-                                if "(" in linha and ")" in linha and "FONE" not in linha and "CLIENTE" not in linha:
+                                # Ignora linhas institucionais e de cabeçalho
+                                if "(" in linha and ")" in linha and "FONE" not in linha and "CLIENTE" not in linha and "COLOCACAO" not in linha:
                                     try:
                                         nome_prog = linha.split(")")[0].split("(")[0].strip()
                                         numeros = re.findall(r'\b\d+\b', linha)
                                         if numeros:
-                                            qtd = int(numeros[-1]) # Pega o último número com segurança
-                                        else:
-                                            qtd = 1
-                                        dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
+                                            qtd = int(numeros[-1])
+                                            # Filtra falsos positivos de ano/código
+                                            if qtd < 500:
+                                                dados_ap.append({"Programa": nome_prog, "Qtd_AP": qtd})
                                     except Exception:
                                         continue
                 
                 tabela_ap = pd.DataFrame(dados_ap)
                 if not tabela_ap.empty:
-                    tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
-                    tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
+                    tabela_ap["Programa_Exibicao"] = tabela_ap["Programa"].apply(lambda x: limpar_texto(x, False))
+                    tabela_ap["Programa_Comparacao"] = tabela_ap["Programa"].apply(lambda x: limpar_texto(x, True))
+                    tabela_ap = tabela_ap.groupby(["Programa_Exibicao", "Programa_Comparacao"], as_index=False)["Qtd_AP"].sum()
                 else:
                     st.warning("⚠️ Nenhum programa válido foi identificado na AP. Verifique o layout do PDF.")
                     st.stop()
 
-                programas_ap = tabela_ap["Programa"].tolist()
+                programas_ap_map = dict(zip(tabela_ap["Programa_Comparacao"], tabela_ap["Programa_Exibicao"]))
 
-                # 2. PROCESSANDO MAPA
+                # 2. PROCESSANDO MAPA (Match sem espaços)
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -113,42 +118,44 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
 
                 dados_mapa = []
                 for linha in texto_mapa.split('\n'):
-                    linha_limpa = limpar_nome_programa(linha)
-                    for prog in programas_ap:
-                        variacoes = obter_variacoes_programa(prog)
-                        if any(v in linha_limpa for v in variacoes):
-                            dados_mapa.append({"Programa": prog, "Qtd_Mapa": 1})
+                    linha_comparacao = limpar_texto(linha, remover_espacos_totais=True)
+                    for prog_comp, prog_exib in programas_ap_map.items():
+                        variacoes = obter_variacoes_programa(prog_comp)
+                        if any(v in linha_comparacao for v in variacoes):
+                            qtd = extrair_qtd_inteligente(linha)
+                            dados_mapa.append({"Programa_Exibicao": prog_exib, "Qtd_Mapa": qtd})
 
                 tabela_mapa = pd.DataFrame(dados_mapa)
                 if not tabela_mapa.empty:
-                    tabela_mapa = tabela_mapa.groupby("Programa", as_index=False).agg({"Qtd_Mapa": "count"})
+                    tabela_mapa = tabela_mapa.groupby("Programa_Exibicao", as_index=False)["Qtd_Mapa"].sum()
                 else:
-                    tabela_mapa = pd.DataFrame(columns=["Programa", "Qtd_Mapa"])
+                    tabela_mapa = pd.DataFrame(columns=["Programa_Exibicao", "Qtd_Mapa"])
 
-                # 3. PROCESSANDO AUDITORIA (LEITURA SEGURA)
+                # 3. PROCESSANDO AUDITORIA (Match sem espaços)
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
                     for pagina in pdf.pages:
                         texto_pag = pagina.extract_text()
                         if texto_pag:
                             for linha in texto_pag.split('\n'):
-                                linha_limpa = limpar_nome_programa(linha)
-                                for prog in programas_ap:
-                                    variacoes = obter_variacoes_programa(prog)
-                                    if any(v in linha_limpa for v in variacoes):
-                                        qtd = extrair_qtd_inteligente(linha_limpa)
-                                        dados_auditoria.append({"Programa": prog, "Qtd_Auditoria": qtd})
+                                linha_comparacao = limpar_texto(linha, remover_espacos_totais=True)
+                                for prog_comp, prog_exib in programas_ap_map.items():
+                                    variacoes = obter_variacoes_programa(prog_comp)
+                                    if any(v in linha_comparacao for v in variacoes):
+                                        qtd = extrair_qtd_inteligente(linha)
+                                        dados_auditoria.append({"Programa_Exibicao": prog_exib, "Qtd_Auditoria": qtd})
 
                 tabela_auditoria = pd.DataFrame(dados_auditoria)
                 if not tabela_auditoria.empty:
-                    tabela_auditoria = tabela_auditoria.groupby("Programa", as_index=False).sum()
+                    tabela_auditoria = tabela_auditoria.groupby("Programa_Exibicao", as_index=False)["Qtd_Auditoria"].sum()
                 else:
-                    tabela_auditoria = pd.DataFrame(columns=["Programa", "Qtd_Auditoria"])
+                    tabela_auditoria = pd.DataFrame(columns=["Programa_Exibicao", "Qtd_Auditoria"])
 
-                # 4. CRUZAMENTO DIRETO
-                df_final = pd.merge(tabela_ap, tabela_mapa, on="Programa", how="left").fillna(0)
-                df_final = pd.merge(df_final, tabela_auditoria, on="Programa", how="left").fillna(0)
+                # 4. CRUZAMENTO
+                df_final = pd.merge(tabela_ap[["Programa_Exibicao", "Qtd_AP"]], tabela_mapa, on="Programa_Exibicao", how="left").fillna(0)
+                df_final = pd.merge(df_final, tabela_auditoria, on="Programa_Exibicao", how="left").fillna(0)
 
+                df_final.rename(columns={"Programa_Exibicao": "Programa"}, inplace=True)
                 df_final["Erro_Veiculo"] = df_final["Qtd_AP"] - df_final["Qtd_Mapa"]
                 df_final["Erro_Auditoria"] = df_final["Qtd_AP"] - df_final["Qtd_Auditoria"]
 
