@@ -15,6 +15,18 @@ st.set_page_config(
     layout="wide"
 )
 
+# ---------------------------------------------------------
+# DICIONÁRIO DE SINÔNIMOS / DE-PARA DE PROGRAMAS
+# Adicione novos apelidos e siglas aqui conforme necessário!
+# ---------------------------------------------------------
+SINONIMOS_PROGRAMAS = {
+    "PIPP": ["PIPP", "PRIMEIRO IMPACTO", "PRIMEIRO IMPACTO PE"],
+    "JN": ["JN", "JORNAL NACIONAL"],
+    "BDPE": ["BDPE", "BOM DIA PE", "BOM DIA PERNAMBUCO"],
+    "GE": ["GE", "GLOBO ESPORTE"],
+    "CFT": ["CFT", "CALDEIRAO", "CALDEIRAO COM MION"]
+}
+
 def limpar_nome_programa(texto):
     if not texto:
         return ""
@@ -22,6 +34,15 @@ def limpar_nome_programa(texto):
     texto = ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
     texto = re.sub(r'\s+', ' ', texto)
     return texto
+
+def obter_variacoes_programa(programa_ap):
+    prog_limpo = limpar_nome_programa(programa_ap)
+    # Procura se o programa da AP tem variações cadastradas
+    for chave, variacoes in SINONIMOS_PROGRAMAS.items():
+        if prog_limpo == chave or prog_limpo in [limpar_nome_programa(v) for v in variacoes]:
+            return [limpar_nome_programa(v) for v in variacoes]
+    # Se não houver variação cadastrada, retorna o próprio nome
+    return [prog_limpo]
 
 st.title("📊 Conciliador de Mídia - 3 Vias")
 st.markdown("Faça o upload dos 3 PDFs da campanha para gerar a auditoria automática de faturamento.")
@@ -48,9 +69,9 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
     if not (arquivo_ap and arquivo_mapa and arquivo_auditoria):
         st.error("⚠️ Por favor, faça o upload dos **3 arquivos** antes de prosseguir.")
     else:
-        with st.spinner("Processando documentos e executando inteligência de conciliação... Aguarde..."):
+        with st.spinner("Processando documentos e cruzando sinônimos... Aguarde..."):
             try:
-                # 1. PROCESSANDO AP (DEFININDO A LISTA MESTRA DE PROGRAMAS)
+                # 1. PROCESSANDO AP
                 dados_ap = []
                 with pdfplumber.open(arquivo_ap) as pdf:
                     for linha in pdf.pages[0].extract_text().split('\n'):
@@ -63,10 +84,10 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 tabela_ap["Programa"] = tabela_ap["Programa"].apply(limpar_nome_programa)
                 tabela_ap = tabela_ap.groupby("Programa", as_index=False).sum()
 
-                # Lista de programas autorizados
-                programas_validos = tabela_ap["Programa"].tolist()
+                # Lista de programas base
+                programas_ap = tabela_ap["Programa"].tolist()
 
-                # 2. PROCESSANDO MAPA (FILTRANDO APENAS PROGRAMAS DA AP)
+                # 2. PROCESSANDO MAPA (OCR NATIVO COM BUSCA POR SINÔNIMOS)
                 doc = fitz.open(stream=arquivo_mapa.read(), filetype="pdf")
                 texto_mapa = ""
                 for num_pagina in range(len(doc)):
@@ -77,9 +98,9 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 dados_mapa = []
                 for linha in texto_mapa.split('\n'):
                     linha_limpa = limpar_nome_programa(linha)
-                    # Verifica se algum programa autorizado está contido nesta linha
-                    for prog in programas_validos:
-                        if prog in linha_limpa:
+                    for prog in programas_ap:
+                        variacoes = obter_variacoes_programa(prog)
+                        if any(v in linha_limpa for v in variacoes):
                             numeros = re.findall(r'\b\d+\b', linha_limpa)
                             if numeros:
                                 qtd = int(numeros[-1])
@@ -91,13 +112,14 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 else:
                     tabela_mapa = pd.DataFrame(columns=["Programa", "Qtd_Mapa"])
 
-                # 3. PROCESSANDO AUDITORIA (FILTRANDO APENAS PROGRAMAS DA AP)
+                # 3. PROCESSANDO AUDITORIA (BUSCA POR SINÔNIMOS)
                 dados_auditoria = []
                 with pdfplumber.open(arquivo_auditoria) as pdf:
                     for linha in pdf.pages[0].extract_text().split('\n'):
                         linha_limpa = limpar_nome_programa(linha)
-                        for prog in programas_validos:
-                            if prog in linha_limpa:
+                        for prog in programas_ap:
+                            variacoes = obter_variacoes_programa(prog)
+                            if any(v in linha_limpa for v in variacoes):
                                 numeros = re.findall(r'\b\d+\b', linha_limpa)
                                 if numeros:
                                     qtd = int(numeros[-1])
@@ -109,7 +131,7 @@ if st.button("🔍 Conciliar Mídia", type="primary", use_container_width=True):
                 else:
                     tabela_auditoria = pd.DataFrame(columns=["Programa", "Qtd_Auditoria"])
 
-                # 4. CRUZAMENTO DIRETO E LIMPO
+                # 4. CRUZAMENTO DIRETO
                 df_final = pd.merge(tabela_ap, tabela_mapa, on="Programa", how="left").fillna(0)
                 df_final = pd.merge(df_final, tabela_auditoria, on="Programa", how="left").fillna(0)
 
